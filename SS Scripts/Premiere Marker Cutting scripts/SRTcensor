@@ -1,0 +1,1131 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
+import os
+import re
+import math
+import textwrap
+import json
+from difflib import SequenceMatcher
+
+ALT_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)*|[^\w\s]")
+ALT_PUNCT_PATTERN = re.compile(r"[^\w\s]")
+
+def alt_tokenize_line(line):
+    """Split a subtitle line into tokens (words and punctuation)."""
+    return ALT_TOKEN_PATTERN.findall(line) if line else []
+
+def alt_parse_srt_content(content):
+    """Parse SRT content string into list of (timecode, [text lines]) blocks."""
+    if not content:
+        return []
+    lines = content.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+    blocks = []
+    i = 0
+    total_lines = len(lines)
+    while i < total_lines:
+        if lines[i].strip() == "":
+            i += 1
+            continue
+        if lines[i].strip().isdigit():
+            i += 1
+            if i >= total_lines:
+                break
+            time_line = lines[i]
+            i += 1
+            text_lines = []
+            while i < total_lines and lines[i] != "":
+                text_lines.append(lines[i])
+                i += 1
+            blocks.append((time_line, text_lines))
+        else:
+            i += 1
+    return blocks
+
+def alt_align_with_reference(prem_blocks, ref_blocks):
+    """Align premiere blocks with reference blocks and return tokens per block plus original line token counts."""
+    show_tokens = []
+    for _, lines in ref_blocks:
+        for line in lines:
+            show_tokens.extend(alt_tokenize_line(line))
+
+    prem_tokens = []
+    prem_token_to_block = []
+    prem_line_token_counts = []
+    for bi, (_, lines) in enumerate(prem_blocks):
+        line_counts = []
+        if not lines:
+            line_counts.append(0)
+        for line in lines:
+            tokens = alt_tokenize_line(line)
+            line_counts.append(len(tokens))
+            prem_tokens.extend(tokens)
+            prem_token_to_block.extend([bi] * len(tokens))
+        prem_line_token_counts.append(line_counts)
+
+    matcher = SequenceMatcher(None, show_tokens, prem_tokens)
+    opcodes = matcher.get_opcodes()
+
+    output_block_tokens = [[] for _ in prem_blocks]
+
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag in ("equal", "replace"):
+            current_i = i1
+            for pj in range(j1, j2):
+                if pj >= len(prem_token_to_block):
+                    break
+                bi = prem_token_to_block[pj]
+                if current_i < i2:
+                    output_block_tokens[bi].append(show_tokens[current_i])
+                    current_i += 1
+            while current_i < i2 and output_block_tokens:
+                output_block_tokens[-1].append(show_tokens[current_i])
+                current_i += 1
+        elif tag == "delete":
+            continue
+        elif tag == "insert":
+            continue
+
+    return output_block_tokens, prem_line_token_counts
+
+class SRTCensorApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("SRT Censor Tool Pro - Enhanced")
+        self.root.geometry("900x700")
+        
+        # Initialize default banned words and corrections
+        self.censor_words = [
+            "killing", "killed", "kill", "die", "dying", "murdered", "dead", "fool", "fools",
+            "motherfuckers", "motherfucker", "fuck", "fucked", "fucking", "fucker", "fuckers",
+            "ass", "asses", "guns", "gun", "bastard", "fat",
+            "drugs", "drug", "chains", "killer", "gunshots",
+            "smacks", "smack", "supremacy", "shit", "shits", "shitting", "shitty",
+            "screwing", "bitching", "bitch", "bitches", "dicking", "pissing",
+            "cunting", "cracker", "wanker", "shitter",
+            "licker", "cocker", "pornstars", "cocaine", "porn",
+            "finish him off", "smoking", "tits", "pussy", "fentanyl", "dumbass",
+            "dumbasses", "asshole", "heroin", "meth", "crack", "ecstasy", "mdma",
+            "opioids", "marijuana", "weed", "lsd", "acid", "xanax", "percocet",
+            "vicodin", "damn", "crap", "hell", "dick", "cock", "slut", "sluts",
+            "whore", "whores", "dickhead", "douche", "cunt", "twat",
+            "pedophile", "rapist", "nigger", "nigga", "chink", "spic", "retard",
+            "faggot", "dyke", "piss", "overdose", "overdoses", "goddamn", "motherfucking",
+            "pendejo",
+            "naked",
+            "birth"
+        ]
+        
+        self.corrections = {
+            r"\bbusiness\b": "bidness",
+            r"\b(skull|scully|scull)\b": "Skully",
+            r"\ba saint joe\b": "This Ain't A Joke",
+            r"\bhey mike\b": "Everybody",
+            r"\bi don't want you ass\b": "Doing What You Asked",
+            r"\bray\b": "Reed",
+            r"\btell him mcdonald\b": "Teddy McDonald",
+            r"\blee\b": "Leon",
+            r"\bima\b": "I'ma",
+            r"\bits\b": "It's",
+            r"\baint\b": "Ain't",
+            r"\byall\b": "y'all",
+            r"\byou all\b": "y'all",
+            r"\bwanna\b": "want to",
+            r"\bgonna\b": "going to",
+            r"\btheir\b": "there",
+            r"\byour\b": "you're",
+            r"\bstall\b": "Stahl",  # Added your requested replacement
+            r"\bscope\b": "coke",
+            r"\buncle\b": "UNC"
+        }
+        
+        self.special_replacements = {
+            "shit": "sh*t",
+            "fuck": "f*ck", 
+            "motherfucker": "motherf*cker",
+            "shitty": "sh*tty",
+            "kill": "k*ll",
+            "killed": "k*lled",
+            "killing": "k*lling",
+            "dead": "d*ad",
+            "goddamn": "godd*mn",
+            "motherfucking": "motherf*cking",
+            "cocaine": "coc*ine",
+            "nigga": "n*gga",
+            "fucking": "f*cking",
+            "bastard": "b*stard",
+            "fat": "f*t",
+            "ass": "*ss",
+            "asses": "*sses",
+            "bitch": "b*tch",
+            "bitches": "b*tches",
+            "damn": "d*mn",
+            "hell": "h*ll",
+            "crap": "cr*p",
+            "coke": "c*ke",
+            "naked": "n*ked",
+            "birth": "b*rth"
+        }
+        
+        self.entries = []
+        self.current_file_path = None
+        self.last_open_dir = os.path.expanduser("~")
+        self.create_widgets()
+        self.root.after(100, self._bring_window_forward)
+        self.update_displays()
+        # Attempt to load default settings silently on startup.
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        self.default_settings_path = os.path.join(script_dir, "srtcensor_settings.json")
+        self.load_settings(initial=True)
+        
+    def create_widgets(self):
+        # Create notebook for tabs
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        # Main processing tab
+        self.main_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.main_frame, text="Main")
+        
+        # Settings tab
+        self.settings_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.settings_frame, text="Settings")
+        
+        self.create_main_tab()
+        self.create_settings_tab()
+        
+    def create_main_tab(self):
+        # Button frame
+        button_frame = tk.Frame(self.main_frame)
+        button_frame.pack(pady=5)
+
+        tk.Button(button_frame, text="Open Files", command=self.open_file).grid(row=0, column=0, padx=5)
+        tk.Button(button_frame, text="Process Text", command=self.process_file).grid(row=0, column=1, padx=5)
+        tk.Button(button_frame, text="Save Output", command=self.save_file).grid(row=0, column=2, padx=5)
+        tk.Button(button_frame, text="Correct w/ Reference", command=self.correct_with_reference).grid(row=0, column=3, padx=5)
+
+        # Text area
+        self.text_area = scrolledtext.ScrolledText(self.main_frame, width=80, height=30)
+        self.text_area.pack(padx=10, pady=10, fill="both", expand=True)
+        
+    def create_settings_tab(self):
+        # Create main container with scrollbar
+        main_container = tk.Frame(self.settings_frame)
+        main_container.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Banned Words Section
+        banned_frame = tk.LabelFrame(main_container, text="Banned Words Management", padx=10, pady=10)
+        banned_frame.pack(fill="both", expand=True, pady=(0, 10))
+        
+        # Add/Remove banned words
+        input_frame = tk.Frame(banned_frame)
+        input_frame.pack(fill="x", pady=(0, 10))
+        
+        tk.Label(input_frame, text="Add/Remove Word:").pack(side="left")
+        self.word_entry = tk.Entry(input_frame, width=20)
+        self.word_entry.pack(side="left", padx=(5, 5))
+        
+        tk.Button(input_frame, text="Add Word", command=self.add_banned_word).pack(side="left", padx=2)
+        tk.Button(input_frame, text="Remove Word", command=self.remove_banned_word).pack(side="left", padx=2)
+        
+        # Banned words display
+        tk.Label(banned_frame, text="Current Banned Words:").pack(anchor="w")
+        
+        # Frame for listbox with scrollbar
+        listbox_frame = tk.Frame(banned_frame)
+        listbox_frame.pack(fill="both", expand=True)
+        
+        scrollbar_banned = tk.Scrollbar(listbox_frame)
+        scrollbar_banned.pack(side="right", fill="y")
+        
+        self.banned_listbox = tk.Listbox(listbox_frame, yscrollcommand=scrollbar_banned.set, height=8)
+        self.banned_listbox.pack(side="left", fill="both", expand=True)
+        scrollbar_banned.config(command=self.banned_listbox.yview)
+        
+        # Word Replacements Section
+        replacements_frame = tk.LabelFrame(main_container, text="Word Replacements", padx=10, pady=10)
+        replacements_frame.pack(fill="both", expand=True)
+        
+        # Add replacement
+        repl_input_frame = tk.Frame(replacements_frame)
+        repl_input_frame.pack(fill="x", pady=(0, 10))
+        
+        tk.Label(repl_input_frame, text="From:").grid(row=0, column=0, sticky="w")
+        self.from_entry = tk.Entry(repl_input_frame, width=15)
+        self.from_entry.grid(row=0, column=1, padx=5)
+        
+        tk.Label(repl_input_frame, text="To:").grid(row=0, column=2, sticky="w")
+        self.to_entry = tk.Entry(repl_input_frame, width=15)
+        self.to_entry.grid(row=0, column=3, padx=5)
+        
+        tk.Button(repl_input_frame, text="Add Replacement", command=self.add_replacement).grid(row=0, column=4, padx=5)
+        tk.Button(repl_input_frame, text="Remove Selected", command=self.remove_replacement).grid(row=0, column=5, padx=5)
+        
+        # Replacements display
+        tk.Label(replacements_frame, text="Current Replacements:").pack(anchor="w")
+        
+        # Frame for replacements listbox with scrollbar
+        repl_listbox_frame = tk.Frame(replacements_frame)
+        repl_listbox_frame.pack(fill="both", expand=True)
+        
+        scrollbar_repl = tk.Scrollbar(repl_listbox_frame)
+        scrollbar_repl.pack(side="right", fill="y")
+        
+        self.replacements_listbox = tk.Listbox(repl_listbox_frame, yscrollcommand=scrollbar_repl.set, height=8)
+        self.replacements_listbox.pack(side="left", fill="both", expand=True)
+        scrollbar_repl.config(command=self.replacements_listbox.yview)
+        
+        # Settings buttons
+        settings_buttons = tk.Frame(main_container)
+        settings_buttons.pack(pady=10)
+        
+        tk.Button(settings_buttons, text="Save Settings", command=self.save_settings).pack(side="left", padx=5)
+        tk.Button(settings_buttons, text="Load Settings", command=self.load_settings).pack(side="left", padx=5)
+        tk.Button(settings_buttons, text="Reset to Defaults", command=self.reset_settings).pack(side="left", padx=5)
+        tk.Button(settings_buttons, text="Test Censoring", command=self.test_censoring).pack(side="left", padx=5)
+        
+        self.update_displays()
+        
+    def add_banned_word(self):
+        word = self.word_entry.get().strip().lower()
+        if word and word not in self.censor_words:
+            self.censor_words.append(word)
+            self.word_entry.delete(0, tk.END)
+            self.update_banned_display()
+            messagebox.showinfo("Success", f"Added '{word}' to banned words list.")
+        elif word in self.censor_words:
+            messagebox.showwarning("Duplicate", f"'{word}' is already in the banned words list.")
+        else:
+            messagebox.showwarning("Invalid", "Please enter a word to add.")
+            
+    def remove_banned_word(self):
+        word = self.word_entry.get().strip().lower()
+        if word and word in self.censor_words:
+            self.censor_words.remove(word)
+            self.word_entry.delete(0, tk.END)
+            self.update_banned_display()
+            messagebox.showinfo("Success", f"Removed '{word}' from banned words list.")
+        elif word not in self.censor_words:
+            messagebox.showwarning("Not Found", f"'{word}' is not in the banned words list.")
+        else:
+            messagebox.showwarning("Invalid", "Please enter a word to remove.")
+            
+    def add_replacement(self):
+        from_word = self.from_entry.get().strip()
+        to_word = self.to_entry.get().strip()
+        
+        if from_word and to_word:
+            pattern = f"\\b{re.escape(from_word)}\\b"
+            self.corrections[pattern] = to_word
+            self.from_entry.delete(0, tk.END)
+            self.to_entry.delete(0, tk.END)
+            self.update_replacements_display()
+            messagebox.showinfo("Success", f"Added replacement: '{from_word}' → '{to_word}'")
+        else:
+            messagebox.showwarning("Invalid", "Please enter both 'from' and 'to' words.")
+            
+    def remove_replacement(self):
+        selection = self.replacements_listbox.curselection()
+        if selection:
+            index = selection[0]
+            items = list(self.corrections.items())
+            if index < len(items):
+                pattern, replacement = items[index]
+                del self.corrections[pattern]
+                self.update_replacements_display()
+                messagebox.showinfo("Success", f"Removed replacement.")
+        else:
+            messagebox.showwarning("No Selection", "Please select a replacement to remove.")
+            
+    def update_displays(self):
+        self.update_banned_display()
+        self.update_replacements_display()
+        
+    def update_banned_display(self):
+        self.banned_listbox.delete(0, tk.END)
+        for word in sorted(self.censor_words):
+            self.banned_listbox.insert(tk.END, word)
+            
+    def update_replacements_display(self):
+        self.replacements_listbox.delete(0, tk.END)
+        for pattern, replacement in self.corrections.items():
+            # Clean up the pattern for display
+            clean_pattern = pattern.replace("\\b", "").replace("\\", "")
+            if clean_pattern.startswith("(") and clean_pattern.endswith(")"):
+                clean_pattern = clean_pattern[1:-1]
+            display_text = f"{clean_pattern} → {replacement}"
+            self.replacements_listbox.insert(tk.END, display_text)
+            
+    def save_settings(self):
+        settings = {
+            "censor_words": self.censor_words,
+            "corrections": self.corrections,
+            "special_replacements": self.special_replacements
+        }
+        
+        save_dialog_kwargs = {
+            "defaultextension": ".json",
+            "filetypes": [("JSON Files", "*.json"), ("All Files", "*.*")]
+        }
+        if hasattr(self, "default_settings_path") and self.default_settings_path:
+            base = os.path.basename(self.default_settings_path)
+            directory = os.path.dirname(self.default_settings_path)
+            if base:
+                save_dialog_kwargs["initialfile"] = base
+            if directory and os.path.isdir(directory):
+                save_dialog_kwargs["initialdir"] = directory
+        
+        file_path = filedialog.asksaveasfilename(**save_dialog_kwargs)
+        
+        if file_path:
+            try:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(settings, f, indent=2, ensure_ascii=False)
+                self.default_settings_path = file_path
+                messagebox.showinfo("Success", f"Settings saved to {file_path}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save settings: {e}")
+                
+    def load_settings(self, file_path=None, initial=False):
+        if initial:
+            target_path = file_path or getattr(self, "default_settings_path", "")
+            if target_path and os.path.isfile(target_path):
+                try:
+                    self._apply_settings_from_path(target_path, show_notice=False)
+                except Exception:
+                    pass  # Silent fail on startup
+            return
+
+        initial_dir = ""
+        if not file_path and hasattr(self, "default_settings_path"):
+            initial_dir = os.path.dirname(self.default_settings_path or "")
+        if not file_path:
+            open_dialog_kwargs = {
+                "filetypes": [("JSON Files", "*.json"), ("All Files", "*.*")]
+            }
+            if os.path.isdir(initial_dir):
+                open_dialog_kwargs["initialdir"] = initial_dir
+            file_path = filedialog.askopenfilename(**open_dialog_kwargs)
+        
+        if not file_path:
+            return
+
+        try:
+            self._apply_settings_from_path(file_path, show_notice=True)
+            self.default_settings_path = file_path
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load settings: {e}")
+
+    def _apply_settings_from_path(self, file_path, show_notice=True):
+        with open(file_path, 'r', encoding='utf-8') as f:
+            settings = json.load(f)
+        if not isinstance(settings, dict):
+            raise ValueError("Settings file is not a JSON object.")
+        
+        if "censor_words" in settings and isinstance(settings["censor_words"], list):
+            self.censor_words = settings["censor_words"]
+        if "corrections" in settings and isinstance(settings["corrections"], dict):
+            self.corrections = settings["corrections"]
+        if "special_replacements" in settings and isinstance(settings["special_replacements"], dict):
+            self.special_replacements = settings["special_replacements"]
+
+        self.update_displays()
+        if show_notice:
+            messagebox.showinfo("Success", f"Settings loaded from {file_path}")
+                
+    def test_censoring(self):
+        """Test the censoring system with sample text."""
+        test_text = "You fat bastard! That shit killed him. I will kill you damn fool. What the hell, fuck this crap!"
+        
+        # Apply censoring
+        pattern = self.build_pattern()
+        censored_text = pattern.sub(self.replacement_func, test_text)
+        
+        # Show results
+        result_window = tk.Toplevel(self.root)
+        result_window.title("Censoring Test Results")
+        result_window.geometry("600x400")
+        
+        tk.Label(result_window, text="Original Text:", font=("Arial", 12, "bold")).pack(anchor="w", padx=10, pady=(10,0))
+        original_text = scrolledtext.ScrolledText(result_window, height=4, wrap=tk.WORD)
+        original_text.pack(fill="x", padx=10, pady=5)
+        original_text.insert("1.0", test_text)
+        original_text.config(state="disabled")
+        
+        tk.Label(result_window, text="Censored Text:", font=("Arial", 12, "bold")).pack(anchor="w", padx=10, pady=(10,0))
+        censored_text_widget = scrolledtext.ScrolledText(result_window, height=4, wrap=tk.WORD)
+        censored_text_widget.pack(fill="x", padx=10, pady=5)
+        censored_text_widget.insert("1.0", censored_text)
+        censored_text_widget.config(state="disabled")
+        
+        # Show detected words
+        detected_words = []
+        for match in pattern.finditer(test_text):
+            detected_words.append(match.group(0))
+            
+        tk.Label(result_window, text=f"Detected Words ({len(detected_words)}):", font=("Arial", 12, "bold")).pack(anchor="w", padx=10, pady=(10,0))
+        words_text = scrolledtext.ScrolledText(result_window, height=6, wrap=tk.WORD)
+        words_text.pack(fill="both", expand=True, padx=10, pady=5)
+        words_text.insert("1.0", ", ".join(detected_words) if detected_words else "No banned words detected")
+        words_text.config(state="disabled")
+        
+    def reset_settings(self):
+        if messagebox.askyesno("Confirm Reset", "Reset all settings to defaults?"):
+            self.__init__(self.root)
+            
+    def generic_censor(self, word):
+        """Replaces the first interior vowel of a word with '*'."""
+        vowels = "aeiou"
+        letters = list(word)
+        for i in range(1, len(letters) - 1):
+            if letters[i].lower() in vowels:
+                letters[i] = "*"
+                return "".join(letters)
+        if len(letters) > 1:
+            letters[1] = "*"
+        return "".join(letters)
+        
+    def build_pattern(self):
+        """Build regex pattern for banned words with proper escaping."""
+        if not self.censor_words:
+            return re.compile(r'(?!)', re.IGNORECASE)  # Pattern that matches nothing
+        
+        # Sort by length (longest first) to match longer phrases before shorter ones
+        sorted_words = sorted(self.censor_words, key=len, reverse=True)
+        escaped_words = [re.escape(word) for word in sorted_words]
+        pattern_str = r'\b(' + '|'.join(escaped_words) + r')\b'
+        
+        return re.compile(pattern_str, flags=re.IGNORECASE)
+        
+    def replacement_func(self, match):
+        """Censor match: use special replacement if defined, otherwise generic."""
+        original = match.group(0)
+        low = original.lower()
+        
+        # Use special replacement if available
+        if low in self.special_replacements:
+            rep = self.special_replacements[low]
+        else:
+            rep = self.generic_censor(low)
+        
+        # Preserve original capitalization
+        if original.isupper():
+            return rep.upper()
+        elif original and original[0].isupper():
+            return rep.capitalize()
+        return rep
+
+    def parse_time(self, time_str):
+        """Parses a time string 'HH:MM:SS,ms' or 'HH:MM:SS.ms' and returns total seconds (float)."""
+        time_str = time_str.replace(',', '.')
+        parts = time_str.split(':')
+        if len(parts) != 3:
+            return 0.0
+        hours, minutes, seconds = parts
+        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+    def format_timecode(self, seconds):
+        """Formats a time in seconds (float) into 'HH:MM:SS,ms' string for SRT/marker file."""
+        total_ms = int(round(seconds * 1000))
+        hours = total_ms // 3600000
+        remainder = total_ms % 3600000
+        minutes = remainder // 60000
+        remainder = remainder % 60000
+        secs = remainder // 1000
+        ms = remainder % 1000
+        return f"{hours:02d}:{minutes:02d}:{secs:02d},{ms:03d}"
+
+    def wrap_text(self, text, max_width, min_lines):
+        """Wraps text so no line exceeds max_width. Ensures at least min_lines lines."""
+        lines = textwrap.wrap(text, width=max_width, break_long_words=False, break_on_hyphens=False)
+        if len(lines) >= min_lines:
+            return lines
+        words = text.split()
+        if not words:
+            return []
+        num_lines = min_lines
+        avg = len(words) / float(num_lines)
+        out_lines = []
+        last = 0.0
+        for i in range(num_lines):
+            start = int(round(last))
+            last += avg
+            end = int(round(last))
+            line = " ".join(words[start:end])
+            out_lines.append(line)
+        final_lines = []
+        for line in out_lines:
+            if len(line) > max_width:
+                wrapped = textwrap.wrap(line, width=max_width,
+                                       break_long_words=False, break_on_hyphens=False)
+                final_lines.extend(wrapped)
+            else:
+                final_lines.append(line)
+        return final_lines
+
+    def process_dialogue_text(self, text):
+        """Applies censorship and basic text corrections to dialogue text."""
+        # Apply corrections AFTER censorship to avoid interference
+        text = text.replace("[", "(").replace("]", ")")
+        # Remove speaker names and polish certain phrases FIRST
+        text = re.sub(r'\b(?:FRANKLIN|SKULLY|AVI|LEON)\b\s*', '', text)
+        text = re.sub(r'\bGrunts softly\b', "Grunts", text)
+        
+        # Now apply censorship
+        pattern = self.build_pattern()
+        text = pattern.sub(self.replacement_func, text)
+        return text
+
+    def process_srt_block(self, block):
+        """Processes one SRT block with censorship and wrapping."""
+        lines = block.splitlines()
+        if not lines:
+            return block
+        new_block_lines = []
+        i = 0
+        # Block number
+        if lines[i].strip().isdigit():
+            new_block_lines.append(lines[i])
+            i += 1
+        # Timecode line
+        timecode_pattern = re.compile(r"\d{2}:\d{2}:\d{2}[,.:]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,.:]\d{3}")
+        timecode_line = ""
+        if i < len(lines) and timecode_pattern.search(lines[i]):
+            timecode_line = lines[i]
+            new_block_lines.append(timecode_line)
+            i += 1
+        # Dialogue text
+        dialogue_text = " ".join(lines[i:])
+        dialogue_text = self.process_dialogue_text(dialogue_text)
+        # Add newline after "Ill tell you this"
+        dialogue_text = re.sub(r"(?i)\b(ill tell you this)\b\s+", lambda m: m.group(1).capitalize() + "\n", dialogue_text)
+        # Compute duration to enforce minimum lines
+        duration = 0.0
+        if timecode_line:
+            parts = re.split(r"\s*-->\s*", timecode_line)
+            if len(parts) == 2:
+                start_sec = self.parse_time(parts[0])
+                end_sec = self.parse_time(parts[1])
+                duration = end_sec - start_sec
+        required_lines = max(1, math.ceil(duration / 2.5))
+        wrapped_lines = self.wrap_text(dialogue_text, 35, required_lines)
+        new_block_lines.extend(wrapped_lines)
+        return "\n".join(new_block_lines)
+
+    def process_text(self, text):
+        """Processes the entire text in SRT format."""
+        # Apply text corrections FIRST, before censorship
+        for pat, repl in self.corrections.items():
+            text = re.sub(pat, repl, text, flags=re.IGNORECASE)
+        
+        # Detect SRT blocks by presence of timecodes
+        if re.search(r"\d{2}:\d{2}:\d{2}[,.:]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,.:]\d{3}", text):
+            blocks = re.split(r'\n\s*\n', text)
+            processed_blocks = []
+            entries = []  # Will hold (time_in_seconds, word)
+            pattern = self.build_pattern()
+            
+            for block in blocks:
+                # Extract start time BEFORE processing for accurate profanity detection
+                ts_match = re.search(r"(\d{2}:\d{2}:\d{2}[,.:]\d{3})", block)
+                start_sec = 0.0
+                if ts_match:
+                    start_time_str = ts_match.group(1)
+                    start_sec = self.parse_time(start_time_str)
+                
+                # Extract dialogue text from original block for profanity detection
+                lines = block.splitlines()
+                i = 0
+                if lines and lines[0].strip().isdigit():
+                    i += 1
+                if i < len(lines) and re.search(r"\d{2}:\d{2}:\d{2}[,.:]\d{3}", lines[i]):
+                    i += 1
+                dialogue_original = " ".join(lines[i:])
+                
+                # Find all banned words in original dialogue BEFORE processing
+                found = set()
+                for match in pattern.finditer(dialogue_original):
+                    word = match.group(0)
+                    low = word.lower()
+                    if low not in found:
+                        found.add(low)
+                        entries.append((start_sec, word))
+                
+                # Now process the block (this will apply censorship)
+                processed_block = self.process_srt_block(block)
+                processed_blocks.append(processed_block)
+                
+            return "\n\n".join(processed_blocks), entries
+        else:
+            # Not SRT format: just apply dialogue processing
+            processed = self.process_dialogue_text(text)
+            return processed, []
+
+    def open_file(self):
+        file_paths = filedialog.askopenfilenames(
+            title="Select SRT or Text Files",
+            filetypes=[("SRT Files", "*.srt"), ("Text Files", "*.txt"), ("All Files", "*.*")]
+        )
+        if file_paths:
+            contents = []
+            load_dir = os.path.dirname(file_paths[0])
+            if os.path.isdir(load_dir):
+                self.last_open_dir = load_dir
+            for idx, file_path in enumerate(file_paths):
+                try:
+                    with open(file_path, 'r', encoding='utf-8-sig') as file:
+                        content = file.read()
+                    if len(file_paths) == 1:
+                        contents.append(content)
+                    else:
+                        header = f"--- File: {os.path.basename(file_path)} ---"
+                        contents.append(f"{header}\n{content.strip()}")
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to open {file_path}: {e}")
+            combined_content = "\n\n".join(contents)
+            self.text_area.delete(1.0, tk.END)
+            self.text_area.insert(tk.END, combined_content)
+            self.current_file_path = file_paths[0] if len(file_paths) == 1 else None
+
+    def process_file(self):
+        content = self.text_area.get(1.0, tk.END)
+        processed_text, entries = self.process_text(content)
+        self.entries = entries
+        # Display censored subtitles
+        self.text_area.delete(1.0, tk.END)
+        self.text_area.insert(tk.END, processed_text)
+
+        if entries:
+            # Inform how many profanities found
+            messagebox.showinfo("Censor Results", f"Found {len(entries)} profanity occurrences.")
+            # Prompt user to save the timestamp file
+            answer = messagebox.askyesno(
+                "Save Timestamps",
+                "Do you want to save a timestamps file for marker creation?"
+            )
+            if answer:
+                save_path = filedialog.asksaveasfilename(
+                    defaultextension=".txt",
+                    filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")]
+                )
+                if save_path:
+                    try:
+                        with open(save_path, 'w', encoding='utf-8') as file:
+                            for ts, word in entries:
+                                time_str = self.format_timecode(ts)
+                                file.write(f"Start: {time_str}\n")
+                                file.write(f"Text: {word}\n")
+                        messagebox.showinfo("File Saved", f"Timestamps file saved to:\n{save_path}")
+                    except Exception as e:
+                        messagebox.showerror("Error", f"Failed to save timestamps file: {e}")
+        else:
+            messagebox.showinfo("No Profanity", "No banned words were detected in the text.")
+
+    def correct_with_reference(self):
+        premiere_path = filedialog.askopenfilename(
+            title="Select Premiere SRT (timing source)",
+            filetypes=[("SRT Files", "*.srt"), ("All Files", "*.*")]
+        )
+        if not premiere_path:
+            return
+
+        reference_path = filedialog.askopenfilename(
+            title="Select Reference SRT (accurate transcript)",
+            filetypes=[("SRT Files", "*.srt"), ("All Files", "*.*")]
+        )
+        if not reference_path:
+            return
+
+        try:
+            with open(premiere_path, 'r', encoding='utf-8-sig') as f:
+                premiere_content = f.read()
+            with open(reference_path, 'r', encoding='utf-8-sig') as f:
+                reference_content = f.read()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to open selected files: {e}")
+            return
+
+        try:
+            corrected_srt = self.correct_and_censor_subtitles(premiere_content, reference_content)
+        except Exception as e:
+            try:
+                corrected_srt = self._alternate_correct_and_censor(premiere_content, reference_content)
+            except Exception as alt_error:
+                messagebox.showerror("Error", f"Failed to correct subtitles:\n{e}\n\nAlternate method also failed:\n{alt_error}")
+                return
+
+        self.text_area.delete(1.0, tk.END)
+        self.text_area.insert(tk.END, corrected_srt)
+        self.current_file_path = premiere_path
+        save_dir = os.path.dirname(premiere_path)
+        if os.path.isdir(save_dir):
+            self.last_open_dir = save_dir
+        self.entries = []
+        messagebox.showinfo("Correction Complete", "Subtitles corrected and censored using the reference transcript.")
+
+    def save_file(self):
+        content = self.text_area.get(1.0, tk.END)
+        save_dialog_kwargs = {
+            "defaultextension": ".srt",
+            "filetypes": [("SRT Files", "*.srt"), ("Text Files", "*.txt")]
+        }
+        if self.current_file_path:
+            save_dialog_kwargs["initialfile"] = os.path.basename(self.current_file_path)
+            save_dialog_kwargs["initialdir"] = os.path.dirname(self.current_file_path)
+        elif self.last_open_dir and os.path.isdir(self.last_open_dir):
+            save_dialog_kwargs["initialdir"] = self.last_open_dir
+
+        file_path = filedialog.asksaveasfilename(**save_dialog_kwargs)
+        if file_path:
+            try:
+                serialized = self.format_srt_for_export(content)
+                with open(file_path, 'w', encoding='utf-8-sig', newline='') as file:
+                    file.write(serialized)
+                self.current_file_path = file_path
+                save_dir = os.path.dirname(file_path)
+                if os.path.isdir(save_dir):
+                    self.last_open_dir = save_dir
+                messagebox.showinfo("File Saved", "Censored subtitles saved successfully.")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save file: {e}")
+
+    def _bring_window_forward(self):
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+            self.root.attributes('-topmost', True)
+            self.root.after(500, lambda: self.root.attributes('-topmost', False))
+        except Exception:
+            pass
+
+    def format_srt_for_export(self, content):
+        """Rebuilds the SRT structure to avoid malformed cues."""
+        text = content.replace('\r\n', '\n').replace('\r', '\n')
+        lines = text.split('\n')
+        time_pattern = re.compile(r'^(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})$')
+
+        entries = []
+        current = {"start": None, "end": None, "text": []}
+
+        def flush_current():
+            if current["start"] is not None:
+                entries.append({
+                    "start": current["start"],
+                    "end": current["end"],
+                    "text": current["text"] if current["text"] else [""]
+                })
+
+        for raw_line in lines:
+            line = raw_line.rstrip('\n').rstrip()
+            stripped = line.strip()
+
+            if stripped == "":
+                flush_current()
+                current = {"start": None, "end": None, "text": []}
+                continue
+
+            if stripped.isdigit() and current["start"] is None:
+                continue
+
+            match = time_pattern.match(stripped.replace('.', ','))
+            if match and current["start"] is None:
+                current["start"] = match.group(1).replace('.', ',')
+                current["end"] = match.group(2).replace('.', ',')
+                continue
+
+            if current["start"] is None:
+                continue
+
+            current["text"].append(stripped)
+
+        flush_current()
+
+        if not entries:
+            cleaned = text.strip('\n')
+            if not cleaned:
+                return ''
+            return cleaned.replace('\n', '\r\n') + '\r\n'
+
+        out_lines = []
+        for idx, entry in enumerate(entries, start=1):
+            out_lines.append(str(idx))
+            out_lines.append(f"{entry['start']} --> {entry['end']}")
+            out_lines.extend(entry["text"])
+            out_lines.append("")
+
+        return "\r\n".join(out_lines).rstrip() + "\r\n"
+
+    def correct_and_censor_subtitles(self, premiere_srt_content, reference_srt_content):
+        prem_blocks = self._parse_srt_blocks(premiere_srt_content)
+        if not prem_blocks:
+            raise ValueError("Premiere SRT could not be parsed.")
+
+        ref_blocks = self._parse_srt_blocks(reference_srt_content)
+        if not ref_blocks:
+            raise ValueError("Reference SRT could not be parsed.")
+
+        prem_words, prem_word_to_block, prem_line_word_counts = self._get_words_and_mapping(prem_blocks)
+        ref_words, ref_word_to_block, ref_line_word_counts = self._get_words_and_mapping(ref_blocks)
+
+        if not prem_words:
+            # No words to correct, return original content
+            return self.format_srt_for_export(premiere_srt_content)
+
+        prem_clean = [re.sub(r'\W', '', w).lower() for w in prem_words]
+        ref_clean = [re.sub(r'\W', '', w).lower() for w in ref_words]
+
+        matcher = SequenceMatcher(None, prem_clean, ref_clean)
+        opcodes = matcher.get_opcodes()
+
+        corrected_block_texts = [""] * len(prem_blocks)
+
+        for tag, i1, i2, j1, j2 in opcodes:
+            if tag in ('equal', 'replace'):
+                prem_segment_len = i2 - i1
+                ref_segment_len = j2 - j1
+                pi, pj = i1, j1
+                if prem_segment_len == ref_segment_len:
+                    while pi < i2 and pj < j2:
+                        block_index = prem_word_to_block[pi]
+                        corrected_block_texts[block_index] = self._append_token(
+                            corrected_block_texts[block_index], ref_words[pj]
+                        )
+                        pi += 1
+                        pj += 1
+                else:
+                    if prem_segment_len > 0:
+                        last_block = prem_word_to_block[i2 - 1]
+                    else:
+                        last_block = prem_word_to_block[i1 - 1] if i1 > 0 else 0
+
+                    # Align available words first
+                    count = min(prem_segment_len, ref_segment_len)
+                    for _ in range(count):
+                        block_index = prem_word_to_block[pi]
+                        corrected_block_texts[block_index] = self._append_token(
+                            corrected_block_texts[block_index], ref_words[pj]
+                        )
+                        pi += 1
+                        pj += 1
+
+                    # If reference has extra words, assign to last block
+                    while pj < j2:
+                        corrected_block_texts[last_block] = self._append_token(
+                            corrected_block_texts[last_block], ref_words[pj]
+                        )
+                        pj += 1
+
+                    # If premiere had extra words, skip them by advancing pi
+                    while pi < i2:
+                        pi += 1
+            elif tag == 'insert':
+                if i1 < len(prem_word_to_block):
+                    insert_block = prem_word_to_block[i1]
+                else:
+                    insert_block = len(prem_blocks) - 1
+                for pj in range(j1, j2):
+                    corrected_block_texts[insert_block] = self._append_token(
+                        corrected_block_texts[insert_block], ref_words[pj]
+                    )
+            elif tag == 'delete':
+                # Skip premiere words not present in reference
+                continue
+
+        badwords_set = self._build_badword_set()
+
+        output_lines = []
+        for block_index, (start_time, end_time, orig_lines) in enumerate(prem_blocks):
+            output_lines.append(str(block_index + 1))
+            output_lines.append(f"{start_time} --> {end_time}")
+
+            corrected_text = corrected_block_texts[block_index].strip()
+            if corrected_text == "":
+                output_lines.append("")
+            else:
+                original_line_counts = list(prem_line_word_counts[block_index])
+                if not original_line_counts or sum(original_line_counts) == 0:
+                    original_line_counts = [len(corrected_text.split())]
+
+                words = corrected_text.split()
+                if len(original_line_counts) <= 1:
+                    censored_line = " ".join(self._censor_token(w, badwords_set) for w in words)
+                    output_lines.append(censored_line)
+                else:
+                    total_words = len(words)
+                    total_original_words = sum(original_line_counts)
+                    new_line_counts = original_line_counts.copy()
+
+                    if total_words != total_original_words:
+                        diff = total_words - total_original_words
+                        if diff > 0:
+                            new_line_counts[-1] += diff
+                        else:
+                            remove = min(-diff, new_line_counts[-1] - 1 if new_line_counts[-1] > 1 else -diff)
+                            new_line_counts[-1] -= remove
+                            new_line_counts = [cnt for cnt in new_line_counts if cnt > 0]
+                            if not new_line_counts:
+                                new_line_counts = [total_words]
+
+                    idx = 0
+                    for count in new_line_counts:
+                        line_words = words[idx: idx + count] if count > 0 else []
+                        idx += count
+                        censored_line = " ".join(self._censor_token(w, badwords_set) for w in line_words)
+                        output_lines.append(censored_line)
+                    if idx < total_words:
+                        remaining_words = words[idx:]
+                        if output_lines:
+                            output_lines[-1] = (output_lines[-1] + " " if output_lines[-1] else "") + " ".join(
+                                self._censor_token(w, badwords_set) for w in remaining_words
+                            )
+                        else:
+                            output_lines.append(" ".join(self._censor_token(w, badwords_set) for w in remaining_words))
+
+            output_lines.append("")
+
+        return "\r\n".join(output_lines).rstrip() + "\r\n"
+
+    def _append_token(self, existing, token):
+        if existing:
+            return existing + " " + token
+        return token
+
+    def _alternate_correct_and_censor(self, premiere_content, reference_content):
+        prem_blocks = alt_parse_srt_content(premiere_content)
+        if not prem_blocks:
+            raise ValueError("Premiere SRT could not be parsed.")
+
+        ref_blocks = alt_parse_srt_content(reference_content) if reference_content else []
+
+        if ref_blocks:
+            output_tokens_per_block, prem_line_token_counts = alt_align_with_reference(prem_blocks, ref_blocks)
+        else:
+            output_tokens_per_block = []
+            prem_line_token_counts = []
+            for _, lines in prem_blocks:
+                tokens = []
+                line_counts = []
+                if not lines:
+                    line_counts.append(0)
+                for line in lines:
+                    line_tokens = alt_tokenize_line(line)
+                    line_counts.append(len(line_tokens))
+                    tokens.extend(line_tokens)
+                output_tokens_per_block.append(tokens)
+                prem_line_token_counts.append(line_counts)
+
+        while len(output_tokens_per_block) < len(prem_blocks):
+            output_tokens_per_block.append([])
+            prem_line_token_counts.append([0])
+
+        pattern = self.build_pattern()
+        output_lines = []
+        for idx, (time_line, _) in enumerate(prem_blocks):
+            output_lines.append(str(idx + 1))
+            output_lines.append(time_line)
+
+            tokens = output_tokens_per_block[idx] if idx < len(output_tokens_per_block) else []
+            builder = []
+            for tok in tokens:
+                if not tok:
+                    continue
+                if ALT_PUNCT_PATTERN.match(tok):
+                    if builder:
+                        builder[-1] = builder[-1] + tok
+                    else:
+                        builder.append(tok)
+                else:
+                    builder.append(tok if not builder else " " + tok)
+            text = "".join(builder).strip()
+
+            lines = self.segment_and_format_text(text)
+            if not lines:
+                output_lines.append("")
+            else:
+                for line in lines:
+                    output_lines.append(pattern.sub(self.replacement_func, line))
+            output_lines.append("")
+
+        return "\r\n".join(output_lines).rstrip() + "\r\n"
+
+    def _parse_srt_blocks(self, content):
+        pattern = re.compile(
+            r'(\d+)\s+([\d:.,]+)\s*-->\s*([\d:.,]+)\s*((?:.|\n)*?)(?=\n\s*\n|\Z)',
+            flags=re.MULTILINE
+        )
+        blocks = []
+        for match in pattern.finditer(content):
+            start_time = match.group(2).strip().replace('.', ',')
+            end_time = match.group(3).strip().replace('.', ',')
+            text_block = match.group(4).replace('\r', '').strip('\n')
+            lines = text_block.splitlines() if text_block else []
+            blocks.append((start_time, end_time, lines))
+        return blocks
+
+    def _get_words_and_mapping(self, blocks):
+        words = []
+        word_to_block = []
+        blocks_line_word_counts = []
+
+        for bi, (_, _, lines) in enumerate(blocks):
+            line_counts = []
+            for line in lines:
+                tokens = line.split()
+                line_counts.append(len(tokens))
+                for token in tokens:
+                    words.append(token)
+                    word_to_block.append(bi)
+            if not lines:
+                line_counts.append(0)
+            blocks_line_word_counts.append(line_counts)
+
+        return words, word_to_block, blocks_line_word_counts
+
+    def _build_badword_set(self):
+        badwords = set()
+
+        for word in self.censor_words:
+            parts = re.split(r'\s+', word)
+            for part in parts:
+                clean = re.sub(r'[^A-Za-z0-9]', '', part)
+                if clean:
+                    badwords.add(clean.lower())
+
+        for pattern in self.special_replacements.keys():
+            parts = re.split(r'\s+', pattern)
+            for part in parts:
+                clean = re.sub(r'[^A-Za-z0-9]', '', part)
+                if clean:
+                    badwords.add(clean.lower())
+
+        return badwords
+
+    def _censor_token(self, token, badwords_set):
+        leading_match = re.match(r'^\W+', token)
+        trailing_match = re.search(r'\W+$', token)
+        leading = leading_match.group(0) if leading_match else ""
+        trailing = trailing_match.group(0) if trailing_match else ""
+
+        start = len(leading)
+        end = len(token) - len(trailing)
+        core = token[start:end]
+
+        if not core:
+            return token
+
+        core_lower = core.lower()
+        if core_lower not in badwords_set:
+            return token
+
+        censored_core = []
+        for ch in core:
+            if ch.lower() in "aeiou":
+                censored_core.append("*")
+            else:
+                censored_core.append(ch)
+        return leading + "".join(censored_core) + trailing
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = SRTCensorApp(root)
+    root.mainloop()
